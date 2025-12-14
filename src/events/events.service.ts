@@ -1,7 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EventEntity } from '../entities/event.entity';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { SeatEntity } from '../entities/seat.entity';
 import { SeatStatus } from '../enums/seat-status.enum';
 import { BookingEntity } from '../entities/booking.entity';
@@ -17,6 +17,8 @@ export class EventsService {
 
     @InjectRepository(BookingEntity)
     private bookingRepo: Repository<BookingEntity>,
+
+    private dataSource: DataSource,
   ) {}
 
   async createEvent(name: string, totalSeats: number) {
@@ -47,40 +49,37 @@ export class EventsService {
 
   async findAll() {
     return this.eventRepository.find({
-      relations: ['seats'], // අර අපි කතා වුනු 'seats' මැජික් එක මෙතන වැඩ කරනවා
+      relations: ['seats'],
     });
   }
 
-  // 👇 The UNSAFE Booking Method
   async bookSeat(seatId: string, userId: string) {
-    // 1. Seat එක Database එකෙන් ගන්නවා (READ)
-    const seat = await this.seatRepository.findOne({ where: { id: seatId } });
+    return await this.dataSource.transaction(async (manager) => {
+      const seat = await manager.findOne(SeatEntity, {
+        where: { id: seatId },
+        lock: { mode: 'pessimistic_write' },
+      });
 
-    if (!seat) {
-      throw new BadRequestException('Seat not found');
-    }
+      if (!seat) {
+        throw new BadRequestException('Seat not found');
+      }
 
-    // 2. Seat එක Available ද කියලා බලනවා (CHECK)
-    if (seat.status !== SeatStatus.AVAILABLE) {
-      throw new BadRequestException('Seat is already booked!');
-    }
+      if (seat.status !== SeatStatus.AVAILABLE) {
+        throw new BadRequestException('Seat is already booked!');
+      }
 
-    // ☠️ DANGER ZONE: RACE CONDITION HAPPENS HERE ☠️
-    // හිතන්න මෙතන පොඩි delay එකක් තියෙනවා කියලා.
-    // User A සහ User B දෙන්නම උඩ පියවරේදී දැක්කා Seat එක Available කියලා.
-    // ඒ නිසා දෙන්නම මේ පේළියට එනවා.
+      await new Promise((resolve) => setTimeout(resolve, 1000));
 
-    // 3. Seat එකේ status එක වෙනස් කරනවා (UPDATE)
-    seat.status = SeatStatus.RESERVED;
-    await this.seatRepository.save(seat);
+      seat.status = SeatStatus.RESERVED;
+      await manager.save(seat);
 
-    // 4. Booking record එකක් දානවා
-    const booking = this.bookingRepo.create({
-      seat: seat,
-      userId: userId,
+      const booking = manager.create(BookingEntity, {
+        seat: seat,
+        userId: userId,
+      });
+      await manager.save(booking);
+
+      return { message: 'Seat booked successfully', bookingId: booking.id };
     });
-    await this.bookingRepo.save(booking);
-
-    return { message: 'Seat booked successfully', bookingId: booking.id };
   }
 }
